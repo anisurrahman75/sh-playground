@@ -41,27 +41,26 @@ import (
 
 type Dir string
 
-type CMD struct {
-	Cmd       *exec.Cmd
-	ChildCmds []*CMD
-}
-
 type Session struct {
-	inj     inject.Injector
-	alias   map[string][]string
-	cmds    []*CMD
-	dir     Dir
-	started bool
-	Env     map[string]string
-	Stdin   io.Reader
-	Stdout  io.Writer
-	Stderr  io.Writer
-	ShowCMD bool // enable for debug
-	timeout time.Duration
+	inj        inject.Injector
+	alias      map[string][]string
+	cmds       []*exec.Cmd
+	backupCmds []*exec.Cmd
+	dir        Dir
+	started    bool
+	Env        map[string]string
+	Stdin      io.Reader
+	Stdout     io.Writer
+
+	Stderr      io.Writer
+	MultiStdout []io.Writer
+	ShowCMD     bool // enable for debug
+	timeout     time.Duration
 
 	// additional pipe options
 	PipeFail      bool // returns error of rightmost no-zero command
 	PipeStdErrors bool // combine std errors of all pipe commands
+	PipeWriters   []*io.PipeWriter
 }
 
 func (s *Session) writePrompt(args ...interface{}) {
@@ -113,11 +112,10 @@ func (s *Session) Alias(alias, cmd string, args ...string) {
 func (s *Session) Command(name string, a ...interface{}) *Session {
 	var args = make([]string, 0)
 	var sType = reflect.TypeOf("")
-	var childCmds = make([]*CMD, 0)
 
 	// init cmd, args, dir, envs
 	// if not init, program may panic
-	s.inj.Map(name).Map(args).Map(s.dir).Map(map[string]string{}).Map(childCmds)
+	s.inj.Map(name).Map(args).Map(s.dir).Map(map[string]string{})
 
 	for _, v := range a {
 		switch reflect.TypeOf(v) {
@@ -132,6 +130,31 @@ func (s *Session) Command(name string, a ...interface{}) *Session {
 	}
 
 	s.inj.Invoke(s.appendCmd)
+
+	return s
+}
+
+func (s *Session) BackupFromStdinCommand(name string, a ...interface{}) *Session {
+	var args = make([]string, 0)
+	var sType = reflect.TypeOf("")
+
+	// init cmd, args, dir, envs
+	// if not init, program may panic
+	s.inj.Map(name).Map(args).Map(s.dir).Map(map[string]string{})
+
+	for _, v := range a {
+		switch reflect.TypeOf(v) {
+		case sType:
+			args = append(args, v.(string))
+		default:
+			s.inj.Map(v)
+		}
+	}
+	if len(args) != 0 {
+		s.inj.Map(args)
+	}
+
+	s.inj.Invoke(s.appendBackupCmd)
 
 	return s
 }
@@ -191,24 +214,16 @@ func newEnviron(env map[string]string, inherit bool) []string { //map[string]str
 	return environ
 }
 
-func (s *Session) appendCmd(cmd string, args []string, cwd Dir, env map[string]string, childCmds []*CMD) {
-	//fmt.Println("append")
-	//fmt.Println("cmd", cmd)
-	//fmt.Println("args", args)
-	//fmt.Println("childCmds:", childCmds)
+func (s *Session) appendCmd(cmd string, args []string, cwd Dir, env map[string]string) {
 	if s.started {
 		s.started = false
-		s.cmds = make([]*CMD, 0)
+		s.cmds = make([]*exec.Cmd, 0)
 	}
-	//
-	//fmt.Println("appendenv", env)
-	//fmt.Println("s.env", s.Env)
 	for k, v := range s.Env {
 		if _, ok := env[k]; !ok {
 			env[k] = v
 		}
 	}
-	//fmt.Println("newEnviron env", env)
 	environ := newEnviron(env, true) // true: inherit sys-env
 	v, ok := s.alias[cmd]
 	if ok {
@@ -218,7 +233,28 @@ func (s *Session) appendCmd(cmd string, args []string, cwd Dir, env map[string]s
 	c := exec.Command(cmd, args...)
 	c.Env = environ
 	c.Dir = string(cwd)
-	parentCmd := &CMD{Cmd: c, ChildCmds: childCmds}
 
-	s.cmds = append(s.cmds, parentCmd)
+	s.cmds = append(s.cmds, c)
+}
+
+func (s *Session) appendBackupCmd(cmd string, args []string, cwd Dir, env map[string]string) {
+	if len(s.backupCmds) == 0 {
+		s.backupCmds = make([]*exec.Cmd, 0)
+	}
+	for k, v := range s.Env {
+		if _, ok := env[k]; !ok {
+			env[k] = v
+		}
+	}
+	environ := newEnviron(env, true) // true: inherit sys-env
+	v, ok := s.alias[cmd]
+	if ok {
+		cmd = v[0]
+		args = append(v[1:], args...)
+	}
+	c := exec.Command(cmd, args...)
+	c.Env = environ
+	c.Dir = string(cwd)
+
+	s.backupCmds = append(s.backupCmds, c)
 }

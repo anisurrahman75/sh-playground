@@ -1,9 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"github.com/anisurrahman75/sh-playground/go-sh"
 	"log"
-	"os/exec"
 )
 
 //export GOROOT=/usr/local/go
@@ -12,22 +12,17 @@ import (
 func main() {
 	session := sh.NewSession()
 	session.ShowCMD = true
-	cmd := sh.CMD{
-		Cmd: exec.Command("echo", "/usr/local"),
-		ChildCmds: []*sh.CMD{
-			{
-				Cmd: exec.Command("ls", "/lost+found/"),
-			},
-		},
-	}
+	session.Command("ls", "/usr/local/")
+	session.Command("echo", "Anisur rahman")
+	//session.Command("xargs")
 
-	cmds := []*sh.CMD{&cmd}
-	session.Command("ls", "/usr/local/", cmds)
+	session.BackupFromStdinCommand("xargs")
+	//session.BackupFromStdinCommand("xargs")
 
-	session.Command("ls", "/usr/local/lib/")
-
-	err := session.Run()
+	out, err := session.Output()
 	if err != nil {
 		log.Fatal(err)
 	}
+	_ = out
+	fmt.Println(string(out))
 }

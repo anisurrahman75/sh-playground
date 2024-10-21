@@ -1,6 +1,7 @@
 package sh
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	_ "fmt"
@@ -15,173 +16,162 @@ import (
 var ErrExecTimeout = errors.New("execute timeout")
 
 // unmarshal shell output to decode json
-//func (s *Session) UnmarshalJSON(data interface{}) (err error) {
-//	bufrw := bytes.NewBuffer(nil)
-//	s.Stdout = bufrw
-//	if err = s.Run(); err != nil {
-//		return
-//	}
-//	return json.NewDecoder(bufrw).Decode(data)
-//}
 //
-//// unmarshal command output into xml
-//func (s *Session) UnmarshalXML(data interface{}) (err error) {
-//	bufrw := bytes.NewBuffer(nil)
-//	s.Stdout = bufrw
-//	if err = s.Run(); err != nil {
-//		return
-//	}
-//	return xml.NewDecoder(bufrw).Decode(data)
-//}
-
-// start command
-//func (s *Session) Start() (err error) {
-//	s.started = true
-//	var rd *io.PipeReader
-//	var wr *io.PipeWriter
-//	var length = len(s.cmds)
-//	if s.ShowCMD {
-//		var cmds = make([]string, 0, 4)
-//		for _, cmd := range s.cmds {
-//			cmds = append(cmds, strings.Join(cmd.Cmd.Args, " "))
-//		}
-//		s.writePrompt(strings.Join(cmds, " | "))
-//	}
-//	//var reader io.PipeReader
-//	//s.start(0, &reader)
-//
-//	for index, cmd := range s.cmds {
-//		if index == 0 {
-//			cmd.Cmd.Stdin = s.Stdin
-//		} else {
-//			cmd.Cmd.Stdin = rd
-//		}
-//
-//		rd, wr = io.Pipe() // create pipe
-//		cmd.Cmd.Stdout = wr
-//		if s.PipeStdErrors {
-//			cmd.Cmd.Stderr = s.Stderr
-//		} else {
-//			cmd.Cmd.Stderr = os.Stderr
-//		}
-//
-//		if index == length-1 {
-//			cmd.Cmd.Stdout = s.Stdout
-//			cmd.Cmd.Stderr = s.Stderr
-//		}
-//		err = cmd.Cmd.Start()
-//		if err != nil {
+//	func (s *Session) UnmarshalJSON(data interface{}) (err error) {
+//		bufrw := bytes.NewBuffer(nil)
+//		s.Stdout = bufrw
+//		if err = s.Run(); err != nil {
 //			return
 //		}
-//
+//		return json.NewDecoder(bufrw).Decode(data)
 //	}
-//	return
-//}
+//
+// // unmarshal command output into xml
+//
+//	func (s *Session) UnmarshalXML(data interface{}) (err error) {
+//		bufrw := bytes.NewBuffer(nil)
+//		s.Stdout = bufrw
+//		if err = s.Run(); err != nil {
+//			return
+//		}
+//		return xml.NewDecoder(bufrw).Decode(data)
+//	}
+func (s *Session) displayCommandChain() {
+	var cmds []string
+	for _, cmd := range s.cmds {
+		cmds = append(cmds, strings.Join(cmd.Args, " "))
+	}
+	s.writePrompt(strings.Join(cmds, " | "))
+}
 
 func (s *Session) Start() error {
 	if s.ShowCMD {
-		var cmds []string
-		for _, cmd := range s.cmds {
-			cmds = append(cmds, strings.Join(cmd.Cmd.Args, " "))
-		}
-		s.writePrompt(strings.Join(cmds, " | "))
+		s.displayCommandChain()
 	}
-
-	return s.startRecursive(0, nil)
+	return s.executeCommandChain(0, nil)
 }
 
-func (s *Session) startRecursive(index int, stdin *io.PipeReader) error {
+//func (s *Session) handleResticMultipleCmds(readers []*io.PipeReader) error {
+//	s.MultiStdout = make([]io.Writer, len(readers))
+//	for idx, reader := range readers {
+//		cmd := s.backupCmds[idx]
+//		cmd.Stdin = reader
+//		cmd.Stdout = s.MultiStdout[idx]
+//
+//		if s.PipeStdErrors {
+//			cmd.Stderr = s.Stderr
+//		} else {
+//			cmd.Stderr = os.Stderr
+//		}
+//
+//		if err := cmd.Start(); err != nil {
+//			return err
+//		}
+//	}
+//	return nil
+//}
+
+func (s *Session) executeCommandChain(index int, stdin *io.PipeReader) error {
 	if index >= len(s.cmds) {
 		return nil
 	}
+	pipeCount := s.determinePipeCount(index)
+	pipeReaders, pipeWriters := createPipes(pipeCount)
+	var writers []io.Writer
+	for _, writer := range pipeWriters {
+		writers = append(writers, writer)
+		s.PipeWriters = append(s.PipeWriters, writer)
+	}
 
-	fmt.Println("----Index:", index)
-
+	multiWriter := io.MultiWriter(writers...)
 	cmd := s.cmds[index]
+
 	if index == 0 {
-		cmd.Cmd.Stdin = s.Stdin
+		cmd.Stdin = s.Stdin
 	} else {
-		cmd.Cmd.Stdin = stdin
+		cmd.Stdin = stdin
 	}
 
-	var (
-		allWriters []io.Writer
-		allReaders []*io.PipeReader
-	)
-
-	for range cmd.ChildCmds {
-		pipeReader, pipeWriter := io.Pipe()
-		allReaders = append(allReaders, pipeReader)
-		allWriters = append(allWriters, pipeWriter)
-	}
-
-	mainReader, mainWriter := io.Pipe()
-	allReaders = append(allReaders, mainReader)
-	allWriters = append(allWriters, mainWriter)
-	multiWriter := io.MultiWriter(allWriters...)
-
-	if index == len(s.cmds)-1 { // Last command in the pipeline.
-		cmd.Cmd.Stdout = s.Stdout
-		cmd.Cmd.Stderr = s.Stderr
+	if s.isLastCommand(index) && len(s.backupCmds) == 0 {
+		cmd.Stdout = s.Stdout
+		cmd.Stderr = s.Stderr
 	} else {
-		cmd.Cmd.Stdout = multiWriter
-		if s.PipeStdErrors {
-			cmd.Cmd.Stderr = s.Stderr
-		} else {
-			cmd.Cmd.Stderr = os.Stderr
-		}
+		fmt.Println("index:", index, "Here")
+		cmd.Stdout = multiWriter
+		cmd.Stderr = s.selectStderr()
 	}
 
-	if err := cmd.Cmd.Start(); err != nil {
-		// Close all writers on error to prevent leaks.
-		//for _, writer := range allWriters {
-		//	writer.Close()
-		//}
+	if err := cmd.Start(); err != nil {
 		return err
 	}
 
-	return s.startRecursive(index+1, allReaders[0])
+	if s.isLastCommand(index) && len(s.backupCmds) != 0 {
+		return s.executeBackupCommands(pipeReaders)
+	}
+	return s.executeCommandChain(index+1, pipeReaders[0])
 }
 
-func (s *Session) start(index int, oldReader *io.PipeReader) { // index==0 s.stdin
-	length := len(s.cmds)
-	cmd := s.cmds[index]
-	cmd.Cmd.Stdin = oldReader
-	newReader, newWritter := io.Pipe() // create pipe
+func (s *Session) executeBackupCommands(readers []*io.PipeReader) error {
+	fmt.Println("readers length", len(readers))
 
-	cmd.Cmd.Stdout = newWritter
+	for idx, reader := range readers {
+		cmd := s.backupCmds[idx]
+		cmd.Stdin = reader
+		cmd.Stdout = s.Stdout
+		cmd.Stderr = s.selectStderr()
+
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Session) determinePipeCount(index int) int {
+	if s.isLastCommand(index) && len(s.backupCmds) != 0 {
+		return len(s.backupCmds)
+	}
+	return 1
+}
+
+func (s *Session) isLastCommand(index int) bool {
+	return index == len(s.cmds)-1
+}
+
+func (s *Session) selectStderr() io.Writer {
 	if s.PipeStdErrors {
-		cmd.Cmd.Stderr = s.Stderr
-	} else {
-		cmd.Cmd.Stderr = os.Stderr
+		return s.Stderr
 	}
-	if index == length-1 {
-		cmd.Cmd.Stdout = s.Stdout
-		cmd.Cmd.Stderr = s.Stderr
+	return os.Stderr
+}
+
+func createPipes(count int) ([]*io.PipeReader, []*io.PipeWriter) {
+	readers := make([]*io.PipeReader, count)
+	writers := make([]*io.PipeWriter, count)
+
+	for i := 0; i < count; i++ {
+		r, w := io.Pipe()
+		readers[i] = r
+		writers[i] = w
 	}
 
-	err := cmd.Cmd.Start()
-	if err != nil {
-		return
-	}
-	if index == length-1 {
-		return
-	}
-
-	s.start(index+1, newReader)
+	return readers, writers
 }
 
 // Should be call after Start()
 // only catch the last command error
 func (s *Session) Wait() error {
 	var pipeErr, lastErr error
-	for _, cmd := range s.cmds {
-		if lastErr = cmd.Cmd.Wait(); lastErr != nil {
+	for idx, cmd := range s.cmds {
+		if lastErr = cmd.Wait(); lastErr != nil {
 			pipeErr = lastErr
 		}
-		wr, ok := cmd.Cmd.Stdout.(*io.PipeWriter)
-		if ok {
-			wr.Close()
+		s.PipeWriters[idx].Close()
+	}
+
+	for _, cmd := range s.backupCmds {
+		if lastErr = cmd.Wait(); lastErr != nil {
+			pipeErr = lastErr
 		}
 	}
 	if s.PipeFail {
@@ -192,8 +182,8 @@ func (s *Session) Wait() error {
 
 func (s *Session) Kill(sig os.Signal) {
 	for _, cmd := range s.cmds {
-		if cmd.Cmd.Process != nil {
-			cmd.Cmd.Process.Signal(sig)
+		if cmd.Process != nil {
+			cmd.Process.Signal(sig)
 		}
 	}
 }
@@ -226,60 +216,60 @@ func (s *Session) Run() (err error) {
 	return s.Wait()
 }
 
-//func (s *Session) Output() (out []byte, err error) {
-//	oldout := s.Stdout
-//	defer func() {
-//		s.Stdout = oldout
-//	}()
-//	stdout := bytes.NewBuffer(nil)
-//	s.Stdout = stdout
-//	err = s.Run()
-//	out = stdout.Bytes()
-//	return
-//}
+func (s *Session) Output() (out []byte, err error) {
+	oldout := s.Stdout
+	defer func() {
+		s.Stdout = oldout
+	}()
+	stdout := bytes.NewBuffer(nil)
+	s.Stdout = stdout
+	err = s.Run()
+	out = stdout.Bytes()
+	return
+}
 
-//func (s *Session) WriteStdout(f string) error {
-//	oldout := s.Stdout
-//	defer func() {
-//		s.Stdout = oldout
-//	}()
-//
-//	out, err := os.Create(f)
-//	if err != nil {
-//		return err
-//	}
-//	defer out.Close()
-//	s.Stdout = out
-//	return s.Run()
-//}
+func (s *Session) WriteStdout(f string) error {
+	oldout := s.Stdout
+	defer func() {
+		s.Stdout = oldout
+	}()
 
-//func (s *Session) AppendStdout(f string) error {
-//	oldout := s.Stdout
-//	defer func() {
-//		s.Stdout = oldout
-//	}()
-//
-//	out, err := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-//	if err != nil {
-//		return err
-//	}
-//	defer out.Close()
-//	s.Stdout = out
-//	return s.Run()
-//}
+	out, err := os.Create(f)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	s.Stdout = out
+	return s.Run()
+}
 
-//func (s *Session) CombinedOutput() (out []byte, err error) {
-//	oldout := s.Stdout
-//	olderr := s.Stderr
-//	defer func() {
-//		s.Stdout = oldout
-//		s.Stderr = olderr
-//	}()
-//	stdout := bytes.NewBuffer(nil)
-//	s.Stdout = stdout
-//	s.Stderr = stdout
-//
-//	err = s.Run()
-//	out = stdout.Bytes()
-//	return
-//}
+func (s *Session) AppendStdout(f string) error {
+	oldout := s.Stdout
+	defer func() {
+		s.Stdout = oldout
+	}()
+
+	out, err := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	s.Stdout = out
+	return s.Run()
+}
+
+func (s *Session) CombinedOutput() (out []byte, err error) {
+	oldout := s.Stdout
+	olderr := s.Stderr
+	defer func() {
+		s.Stdout = oldout
+		s.Stderr = olderr
+	}()
+	stdout := bytes.NewBuffer(nil)
+	s.Stdout = stdout
+	s.Stderr = stdout
+
+	err = s.Run()
+	out = stdout.Bytes()
+	return
+}
