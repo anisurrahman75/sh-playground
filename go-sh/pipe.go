@@ -2,8 +2,9 @@ package sh
 
 import (
 	"bytes"
+	"encoding/json"
+	"encoding/xml"
 	"errors"
-	"fmt"
 	_ "fmt"
 	"io"
 	"os"
@@ -16,26 +17,25 @@ import (
 var ErrExecTimeout = errors.New("execute timeout")
 
 // unmarshal shell output to decode json
-//
-//	func (s *Session) UnmarshalJSON(data interface{}) (err error) {
-//		bufrw := bytes.NewBuffer(nil)
-//		s.Stdout = bufrw
-//		if err = s.Run(); err != nil {
-//			return
-//		}
-//		return json.NewDecoder(bufrw).Decode(data)
-//	}
-//
+
+func (s *Session) UnmarshalJSON(data interface{}) (err error) {
+	bufrw := bytes.NewBuffer(nil)
+	s.Stdout = bufrw
+	if err = s.Run(); err != nil {
+		return
+	}
+	return json.NewDecoder(bufrw).Decode(data)
+}
+
 // // unmarshal command output into xml
-//
-//	func (s *Session) UnmarshalXML(data interface{}) (err error) {
-//		bufrw := bytes.NewBuffer(nil)
-//		s.Stdout = bufrw
-//		if err = s.Run(); err != nil {
-//			return
-//		}
-//		return xml.NewDecoder(bufrw).Decode(data)
-//	}
+func (s *Session) UnmarshalXML(data interface{}) (err error) {
+	bufrw := bytes.NewBuffer(nil)
+	s.Stdout = bufrw
+	if err = s.Run(); err != nil {
+		return
+	}
+	return xml.NewDecoder(bufrw).Decode(data)
+}
 func (s *Session) displayCommandChain() {
 	var cmds []string
 	for _, cmd := range s.cmds {
@@ -50,26 +50,6 @@ func (s *Session) Start() error {
 	}
 	return s.executeCommandChain(0, nil)
 }
-
-//func (s *Session) handleResticMultipleCmds(readers []*io.PipeReader) error {
-//	s.MultiStdout = make([]io.Writer, len(readers))
-//	for idx, reader := range readers {
-//		cmd := s.backupCmds[idx]
-//		cmd.Stdin = reader
-//		cmd.Stdout = s.MultiStdout[idx]
-//
-//		if s.PipeStdErrors {
-//			cmd.Stderr = s.Stderr
-//		} else {
-//			cmd.Stderr = os.Stderr
-//		}
-//
-//		if err := cmd.Start(); err != nil {
-//			return err
-//		}
-//	}
-//	return nil
-//}
 
 func (s *Session) executeCommandChain(index int, stdin *io.PipeReader) error {
 	if index >= len(s.cmds) {
@@ -96,7 +76,6 @@ func (s *Session) executeCommandChain(index int, stdin *io.PipeReader) error {
 		cmd.Stdout = s.Stdout
 		cmd.Stderr = s.Stderr
 	} else {
-		fmt.Println("index:", index, "Here")
 		cmd.Stdout = multiWriter
 		cmd.Stderr = s.selectStderr()
 	}
@@ -112,12 +91,11 @@ func (s *Session) executeCommandChain(index int, stdin *io.PipeReader) error {
 }
 
 func (s *Session) executeBackupCommands(readers []*io.PipeReader) error {
-	fmt.Println("readers length", len(readers))
-
 	for idx, reader := range readers {
 		cmd := s.backupCmds[idx]
+		cmdOutput := bytes.Buffer{}
 		cmd.Stdin = reader
-		cmd.Stdout = s.Stdout
+		cmd.Stdout = io.MultiWriter(s.Stdout, &cmdOutput)
 		cmd.Stderr = s.selectStderr()
 
 		if err := cmd.Start(); err != nil {
@@ -162,22 +140,28 @@ func createPipes(count int) ([]*io.PipeReader, []*io.PipeWriter) {
 // only catch the last command error
 func (s *Session) Wait() error {
 	var pipeErr, lastErr error
-	for idx, cmd := range s.cmds {
-		if lastErr = cmd.Wait(); lastErr != nil {
-			pipeErr = lastErr
+	for idx, writter := range s.PipeWriters {
+		if idx < len(s.cmds) {
+			cmd := s.cmds[idx]
+			if lastErr = cmd.Wait(); lastErr != nil {
+				pipeErr = lastErr
+			}
 		}
-		s.PipeWriters[idx].Close()
+		writter.Close()
+	}
+	var pipeErrs []error
+	for _, cmd := range s.backupCmds {
+		if err := cmd.Wait(); err != nil {
+			pipeErrs = append(pipeErrs, err)
+		}
 	}
 
-	for _, cmd := range s.backupCmds {
-		if lastErr = cmd.Wait(); lastErr != nil {
-			pipeErr = lastErr
-		}
-	}
 	if s.PipeFail {
 		return pipeErr
 	}
-	return lastErr
+
+	pipeErrs = append([]error{pipeErr}, pipeErrs...)
+	return errors.Join(pipeErrs...)
 }
 
 func (s *Session) Kill(sig os.Signal) {

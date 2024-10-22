@@ -52,10 +52,9 @@ type Session struct {
 	Stdin      io.Reader
 	Stdout     io.Writer
 
-	Stderr      io.Writer
-	MultiStdout []io.Writer
-	ShowCMD     bool // enable for debug
-	timeout     time.Duration
+	Stderr  io.Writer
+	ShowCMD bool // enable for debug
+	timeout time.Duration
 
 	// additional pipe options
 	PipeFail      bool // returns error of rightmost no-zero command
