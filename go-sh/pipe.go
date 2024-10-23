@@ -8,6 +8,7 @@ import (
 	_ "fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	_ "strings"
 	"syscall"
@@ -37,11 +38,21 @@ func (s *Session) UnmarshalXML(data interface{}) (err error) {
 	return xml.NewDecoder(bufrw).Decode(data)
 }
 func (s *Session) displayCommandChain() {
-	var cmds []string
-	for _, cmd := range s.cmds {
-		cmds = append(cmds, strings.Join(cmd.Args, " "))
+	joinCmds := func(cmds []*exec.Cmd) []string {
+		result := make([]string, len(cmds))
+		for i, cmd := range cmds {
+			result[i] = strings.Join(cmd.Args, " ")
+		}
+		return result
 	}
-	s.writePrompt(strings.Join(cmds, " | "))
+	primaryCmds, backupCmds := joinCmds(s.cmds), joinCmds(s.backupCmds)
+
+	totalCmd := strings.Join(primaryCmds, " | ")
+	if len(backupCmds) > 0 {
+		totalCmd += " | " + strings.Join(backupCmds, " , ")
+	}
+
+	s.writePrompt(totalCmd)
 }
 
 func (s *Session) Start() error {
@@ -93,9 +104,8 @@ func (s *Session) executeCommandChain(index int, stdin *io.PipeReader) error {
 func (s *Session) executeBackupCommands(readers []*io.PipeReader) error {
 	for idx, reader := range readers {
 		cmd := s.backupCmds[idx]
-		cmdOutput := bytes.Buffer{}
 		cmd.Stdin = reader
-		cmd.Stdout = io.MultiWriter(s.Stdout, &cmdOutput)
+		cmd.Stdout = io.MultiWriter(s.Stdout)
 		cmd.Stderr = s.selectStderr()
 
 		if err := cmd.Start(); err != nil {
